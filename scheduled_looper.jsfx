@@ -1,4 +1,4 @@
-desc:Scheduled Looper
+desc:Ostertoaster Timeline Looper
 //tags:looper recording
 options:gmem=scheduled_looper
 // Double-buffered looper: records into one buffer while playing from another.

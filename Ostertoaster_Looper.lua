@@ -1,10 +1,10 @@
--- @description Scheduled Looper
+-- @description Ostertoaster Timeline Looper
 -- @author Ostertoaster
 -- @version 1.0
 -- @provides
 --   [effect] Ostertoaster/scheduled_looper.jsfx
 -- @about
---   Scheduled live looper for REAPER. Place red "rec" and green "play" MIDI items
+--   Timeline looper for REAPER. Place red "rec" and green "play" MIDI items
 --   on a track to define recording and playback regions. The companion JSFX plugin
 --   handles real-time audio capture and playback with crossfading.
 --
@@ -12,7 +12,7 @@
 -- Exports buffer before advancing to the next group on the same track.
 
 local reaper = reaper
-local SCRIPT_NAME = "Scheduled Looper (JSFX)"
+local SCRIPT_NAME = "Ostertoaster Timeline Looper"
 
 reaper.gmem_attach("scheduled_looper")
 
