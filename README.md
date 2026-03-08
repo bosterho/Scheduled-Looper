@@ -2,7 +2,7 @@
 
 Most loopers trap your audio inside a plugin. This one puts it on the timeline.
 
-Place red clips to record and green clips to play back. Hit play, and as the playhead moves through them, the recordings land in the arrange view as real audio items so you can edit and arrange them afterward. There's a lot more to it, but the best way to find out is to try it 😉
+Place red clips to record and green clips to play back. Hit play, and as the playhead moves through them, the recordings land in the arrange view as audio items so you can edit and arrange them afterward. There's a lot more to it, but the best way to find out is to try it 😉
 
 ## Install
 
