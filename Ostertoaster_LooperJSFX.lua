@@ -1,4 +1,13 @@
--- Scheduled Looper (JSFX Companion)
+-- @description Scheduled Looper
+-- @author Ostertoaster
+-- @version 1.0
+-- @provides
+--   [effect] Ostertoaster/scheduled_looper.jsfx
+-- @about
+--   Scheduled live looper for REAPER. Place red "rec" and green "play" MIDI items
+--   on a track to define recording and playback regions. The companion JSFX plugin
+--   handles real-time audio capture and playback with crossfading.
+--
 -- Scans tracks for rec/play MIDI items, writes current group to gmem per track.
 -- Exports buffer before advancing to the next group on the same track.
 
@@ -116,6 +125,8 @@ local function scan_all_tracks()
         play_buf = old and old.play_buf or 0,
         exported = old and old.exported or false,
         cleared = old and old.cleared or false,
+        rec_exported = old and old.rec_exported or false,
+        group_exports = old and old.group_exports or {},
       }
     end
   end
@@ -124,7 +135,7 @@ end
 
 -- ─── JSFX management ───────────────────────────────────────────────────────
 
-local JSFX_ADD_NAME = "JS:scheduled_looper"
+local JSFX_ADD_NAME = "JS:Ostertoaster/scheduled_looper"
 local jsfx_managed = {}
 local track_original_state = {} -- saved arm/monitor state per track
 
@@ -328,16 +339,11 @@ local function find_new_audio_item(track, snapshot)
   return nil
 end
 
-local function place_at_play_regions(group, audio_track, src_filename, rec_len, saved_prl)
-  reaper.PreventUIRefresh(1)
-
-  -- Use saved prl from export time (buffer may have swapped since then)
+local function compute_export_params(src_filename, rec_len, saved_prl)
   local srate = reaper.GetSetProjectInfo(0, "PROJECT_SRATE", 0, false)
   if srate == 0 then srate = 44100 end
   local prl_frames = saved_prl or 0
   local actual_pre = prl_frames > 0 and (prl_frames / srate) or PRE_ROLL
-
-  -- Get actual source length
   local probe_src = reaper.PCM_Source_CreateFromFile(src_filename)
   local src_len = 0
   if probe_src then
@@ -345,65 +351,66 @@ local function place_at_play_regions(group, audio_track, src_filename, rec_len, 
     reaper.PCM_Source_Destroy(probe_src)
   end
   local actual_post = src_len > 0 and math.max(0, src_len - rec_len - actual_pre) or POST_ROLL
-
-  -- Place audio under the rec item
-  if not is_item_muted(group.rec_item) then
-    local rec_pos = get_item_pos(group.rec_item)
-    local new_item = reaper.AddMediaItemToTrack(audio_track)
-    local new_take = reaper.AddTakeToMediaItem(new_item)
-    local new_source = reaper.PCM_Source_CreateFromFile(src_filename)
-    reaper.SetMediaItemTake_Source(new_take, new_source)
-    reaper.SetMediaItemInfo_Value(new_item, "B_LOOPSRC", 0)
-    reaper.SetMediaItemInfo_Value(new_item, "D_POSITION", rec_pos - actual_pre)
-    reaper.SetMediaItemInfo_Value(new_item, "D_LENGTH", src_len > 0 and src_len or (rec_len + PRE_ROLL + POST_ROLL))
-    reaper.SetMediaItemInfo_Value(new_item, "D_FADEINLEN", actual_pre)
-    reaper.SetMediaItemInfo_Value(new_item, "D_FADEOUTLEN", actual_post)
-  end
-  for _, play_item in ipairs(group.play_items) do
-    if not is_item_muted(play_item) then
-      local play_pos = get_item_pos(play_item)
-      local play_len = get_item_len(play_item)
-      local play_end = play_pos + play_len
-      local is_reverse = get_item_name(play_item):find("rev") ~= nil
-      local n_copies = math.ceil(play_len / rec_len)
-      for c = 0, n_copies - 1 do
-        local grid_pos = play_pos + c * rec_len
-        local remaining = play_end - grid_pos
-        local copy_main = math.min(rec_len, remaining)
-        local item_pos = grid_pos - actual_pre
-        local item_len = copy_main + actual_pre + actual_post
-        local new_item = reaper.AddMediaItemToTrack(audio_track)
-        local new_take = reaper.AddTakeToMediaItem(new_item)
-        local new_source = reaper.PCM_Source_CreateFromFile(src_filename)
-        reaper.SetMediaItemTake_Source(new_take, new_source)
-        reaper.SetMediaItemInfo_Value(new_item, "B_LOOPSRC", 0)
-        reaper.SetMediaItemInfo_Value(new_item, "D_POSITION", item_pos)
-        reaper.SetMediaItemInfo_Value(new_item, "D_LENGTH", item_len)
-        reaper.SetMediaItemInfo_Value(new_item, "D_FADEINLEN", actual_pre)
-        reaper.SetMediaItemInfo_Value(new_item, "D_FADEOUTLEN", actual_post)
-        if is_reverse then
-          reaper.SetMediaItemSelected(new_item, true)
-          reaper.Main_OnCommand(41051, 0) -- Toggle take reverse
-          reaper.SetMediaItemSelected(new_item, false)
-        end
-      end
-    end
-  end
-  reaper.PreventUIRefresh(-1)
-  reaper.UpdateArrange()
+  return {
+    file = src_filename, rec_len = rec_len,
+    actual_pre = actual_pre, actual_post = actual_post,
+    src_len = src_len,
+  }
 end
 
-local function queue_export(group, track)
+local function place_single_item(audio_track, position, length, ep, is_reverse)
+  local new_item = reaper.AddMediaItemToTrack(audio_track)
+  local new_take = reaper.AddTakeToMediaItem(new_item)
+  local new_source = reaper.PCM_Source_CreateFromFile(ep.file)
+  reaper.SetMediaItemTake_Source(new_take, new_source)
+  reaper.SetMediaItemInfo_Value(new_item, "B_LOOPSRC", 0)
+  reaper.SetMediaItemInfo_Value(new_item, "D_POSITION", position)
+  reaper.SetMediaItemInfo_Value(new_item, "D_LENGTH", length)
+  reaper.SetMediaItemInfo_Value(new_item, "D_FADEINLEN", ep.actual_pre)
+  reaper.SetMediaItemInfo_Value(new_item, "D_FADEOUTLEN", ep.actual_post)
+  if is_reverse then
+    reaper.SetMediaItemSelected(new_item, true)
+    reaper.Main_OnCommand(41051, 0) -- Toggle take reverse
+    reaper.SetMediaItemSelected(new_item, false)
+  end
+end
+
+local function place_rec_audio(group, audio_track, ep)
+  if is_item_muted(group.rec_item) then return end
+  local rec_pos = get_item_pos(group.rec_item)
+  local length = ep.src_len > 0 and ep.src_len or (ep.rec_len + PRE_ROLL + POST_ROLL)
+  place_single_item(audio_track, rec_pos - ep.actual_pre, length, ep, false)
+end
+
+local function place_play_item_audio(audio_track, play_item, ep)
+  if is_item_muted(play_item) then return end
+  local play_pos = get_item_pos(play_item)
+  local play_len = get_item_len(play_item)
+  local play_end = play_pos + play_len
+  local is_reverse = get_item_name(play_item):find("rev") ~= nil
+  local n_copies = math.ceil(play_len / ep.rec_len)
+  for c = 0, n_copies - 1 do
+    local grid_pos = play_pos + c * ep.rec_len
+    local remaining = play_end - grid_pos
+    local copy_main = math.min(ep.rec_len, remaining)
+    local item_pos = grid_pos - ep.actual_pre
+    local item_len = copy_main + ep.actual_pre + ep.actual_post
+    place_single_item(audio_track, item_pos, item_len, ep, is_reverse)
+  end
+end
+
+local function queue_export(group, track, group_idx, export_buf)
   local track_idx = reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER") - 1
-  -- Read prl from the export buffer: gmem[40]=rec buf prl, gmem[80]=play buf prl
-  local exp_buf = reaper.gmem_read(60 + track_idx)
-  local rec_buf = reaper.gmem_read(50 + track_idx)
-  local prl = reaper.gmem_read(exp_buf == rec_buf and (40 + track_idx) or (80 + track_idx))
+  local rec_buf_gmem = reaper.gmem_read(50 + track_idx)
+  local prl = reaper.gmem_read(export_buf == rec_buf_gmem and (40 + track_idx) or (80 + track_idx))
   export_queue[#export_queue + 1] = {
     group = group,
     track_idx = track_idx,
     rec_start = get_item_pos(group.rec_item),
     prl_frames = prl,
+    group_idx = group_idx,
+    track = track,
+    export_buf = export_buf,
   }
 end
 
@@ -418,12 +425,15 @@ local function process_export()
     local audio_track = get_track_below(next_exp.group.track)
     local pre_snap = snapshot_audio_items(audio_track)
     reaper.SetEditCurPos(next_exp.rec_start, false, false)
+    reaper.gmem_write(60 + next_exp.track_idx, next_exp.export_buf)
     reaper.gmem_write(21, next_exp.track_idx + 1)
     reaper.gmem_write(20, next_exp.track_idx + 1) -- trigger = track_idx + 1
     pending_export = {
       group = next_exp.group, phase = "wait", tick = 0,
       audio_track = audio_track, pre_snap = pre_snap,
       prl_frames = next_exp.prl_frames,
+      group_idx = next_exp.group_idx,
+      track = next_exp.track,
     }
   end
 
@@ -453,7 +463,17 @@ local function process_export()
         local src_filename = source and reaper.GetMediaSourceFileName(source)
         reaper.DeleteTrackMediaItem(pe.audio_track, item)
         if src_filename and src_filename ~= "" then
-          place_at_play_regions(pe.group, pe.audio_track, src_filename, rec_len, pe.prl_frames)
+          -- Save export params for incremental placement
+          local td = track_data[pe.track or pe.group.track]
+          if td and pe.group_idx then
+            local ep = compute_export_params(src_filename, rec_len, pe.prl_frames)
+            td.group_exports[pe.group_idx] = {
+              ep = ep,
+              audio_track = pe.audio_track,
+              rec_placed = false,
+              plays_placed = {},
+            }
+          end
         end
       end
     end
@@ -518,6 +538,8 @@ local function looper_tick()
       td.play_buf = 0
       td.exported = false
       td.cleared = false
+      td.rec_exported = false
+      td.group_exports = {}
       for i, g in ipairs(td.groups) do
         local rec_end = get_item_pos(g.rec_item) + get_item_len(g.rec_item)
         if pos < rec_end + POST_ROLL then
@@ -545,15 +567,35 @@ local function looper_tick()
       local group = td.groups[td.current]
       if not group then goto next_track end
 
-      -- Clear old audio only when playhead is actually in the rec region (about to record)
+      -- Clear old audio before playhead reaches rec region pre-roll
+      -- Extra 0.2s margin ensures items are gone before the audio engine renders them
+      -- Skip if rec item is muted (no new recording will replace old audio)
       if not td.cleared then
         local rec_start = get_item_pos(group.rec_item)
-        if pos >= rec_start - PRE_ROLL then
+        if pos >= rec_start - PRE_ROLL - 0.2 then
           local rec_end = rec_start + get_item_len(group.rec_item)
-          if pos < rec_end + POST_ROLL then
+          if pos < rec_end + POST_ROLL and not is_item_muted(group.rec_item) then
             clear_group_audio(group)
           end
           td.cleared = true
+        end
+      end
+
+      -- Export recording early (after rec region + full buffer length has passed)
+      -- The JSFX temp item spans rec_start to rec_end + PRE_ROLL + POST_ROLL,
+      -- so the playhead must be past that to avoid the temp item causing clicks
+      if not td.rec_exported then
+        local rec_start = get_item_pos(group.rec_item)
+        local rec_end = rec_start + get_item_len(group.rec_item)
+        if pos >= rec_end + PRE_ROLL + POST_ROLL then
+          if not is_item_muted(group.rec_item) then
+            local track_idx = reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER") - 1
+            local buf_len = reaper.gmem_read(10 + track_idx)
+            if buf_len > 0 then
+              queue_export(group, track, td.current, td.rec_buf)
+            end
+          end
+          td.rec_exported = true
         end
       end
 
@@ -566,14 +608,16 @@ local function looper_tick()
           td.rec_buf = 1 - td.rec_buf  -- swap recording buffer
           td.current = td.current + 1
           td.cleared = false
-          -- Clear the new group's old audio
-          clear_group_audio(next_group)
+          td.rec_exported = false
+          -- Clear the new group's old audio (only if its rec is active)
+          if not is_item_muted(next_group.rec_item) then
+            clear_group_audio(next_group)
+          end
           td.cleared = true
         end
       end
 
-      -- Switch play group when old play clips are done
-      -- Export here so items are placed AFTER the playhead has passed them
+      -- Switch play group buffer when old play clips are done
       if td.play_current < td.current then
         local play_group = td.groups[td.play_current]
         local all_done = true
@@ -589,16 +633,42 @@ local function looper_tick()
           end
         end
         if all_done then
-          -- Export the finished play group (playhead is past all items)
-          local track_idx = reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER") - 1
-          local buf_len = reaper.gmem_read(70 + track_idx)
-          if buf_len > 0 then
-            reaper.gmem_write(60 + track_idx, td.play_buf)
-            queue_export(play_group, track)
-          end
           td.play_current = td.current
           td.play_buf = td.rec_buf
         end
+      end
+
+      -- Incrementally place exported audio as playhead passes items
+      -- Use actual_post * 2 margin to ensure playhead is well past
+      -- the placed item's fade-out tail (accounts for audio buffer latency)
+      local any_placed = false
+      for gi, ge in pairs(td.group_exports) do
+        local g = td.groups[gi]
+        if g and ge.ep and ge.audio_track then
+          local margin = ge.ep.actual_post * 2
+          if not ge.rec_placed then
+            local rec_end_pos = get_item_pos(g.rec_item) + get_item_len(g.rec_item)
+            if pos >= rec_end_pos + margin then
+              if not any_placed then reaper.PreventUIRefresh(1); any_placed = true end
+              place_rec_audio(g, ge.audio_track, ge.ep)
+              ge.rec_placed = true
+            end
+          end
+          for pi, play_item in ipairs(g.play_items) do
+            if not ge.plays_placed[pi] then
+              local play_end = get_item_pos(play_item) + get_item_len(play_item)
+              if pos >= play_end + margin then
+                if not any_placed then reaper.PreventUIRefresh(1); any_placed = true end
+                place_play_item_audio(ge.audio_track, play_item, ge.ep)
+                ge.plays_placed[pi] = true
+              end
+            end
+          end
+        end
+      end
+      if any_placed then
+        reaper.PreventUIRefresh(-1)
+        reaper.UpdateArrange()
       end
 
       ::next_track::
@@ -612,27 +682,19 @@ local function looper_tick()
       set_track_xfade(track)
       local track_idx = reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER") - 1
 
-      -- Export play group if it wasn't exported yet (play clips didn't finish)
+      -- Sync play group state
       if td.play_current < td.current then
-        local play_group = td.groups[td.play_current]
-        if play_group then
-          local buf_len = reaper.gmem_read(70 + track_idx)
-          if buf_len > 0 then
-            reaper.gmem_write(60 + track_idx, td.play_buf)
-            queue_export(play_group, track)
-          end
-        end
         td.play_current = td.current
         td.play_buf = td.rec_buf
       end
 
-      -- Export current rec group
+      -- Export current rec group if not already exported and rec is active
       local group = td.groups[td.current]
-      if not group then goto skip end
-      local buf_len = reaper.gmem_read(10 + track_idx)
-      if buf_len > 0 then
-        reaper.gmem_write(60 + track_idx, td.rec_buf)
-        queue_export(group, track)
+      if group and not td.group_exports[td.current] and not is_item_muted(group.rec_item) then
+        local buf_len = reaper.gmem_read(10 + track_idx)
+        if buf_len > 0 then
+          queue_export(group, track, td.current, td.rec_buf)
+        end
       end
       ::skip::
     end
@@ -642,6 +704,35 @@ local function looper_tick()
 
   write_gmem()
   process_export()
+
+  -- Place all remaining exported items when stopped
+  if play_state == 0 then
+    local any_placed = false
+    for track, td in pairs(track_data) do
+      for gi, ge in pairs(td.group_exports) do
+        local g = td.groups[gi]
+        if g and ge.ep and ge.audio_track then
+          if not ge.rec_placed then
+            if not any_placed then reaper.PreventUIRefresh(1); any_placed = true end
+            place_rec_audio(g, ge.audio_track, ge.ep)
+            ge.rec_placed = true
+          end
+          for pi, play_item in ipairs(g.play_items) do
+            if not ge.plays_placed[pi] then
+              if not any_placed then reaper.PreventUIRefresh(1); any_placed = true end
+              place_play_item_audio(ge.audio_track, play_item, ge.ep)
+              ge.plays_placed[pi] = true
+            end
+          end
+        end
+      end
+    end
+    if any_placed then
+      reaper.PreventUIRefresh(-1)
+      reaper.UpdateArrange()
+    end
+  end
+
   reaper.defer(looper_tick)
 end
 

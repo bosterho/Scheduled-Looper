@@ -1,0 +1,264 @@
+desc:Scheduled Looper
+//tags:looper recording
+options:gmem=scheduled_looper
+// Double-buffered looper: records into one buffer while playing from another.
+// Lua advances groups and swaps buffers so playback is never interrupted.
+//
+// GMEM LAYOUT (name: "scheduled_looper"):
+//   Per-track slot (base = 100 + track_index * 50):
+//     [base+0]  = rec_start (seconds)
+//     [base+1]  = rec_end (seconds)
+//     [base+2]  = rec_muted (0/1)
+//     [base+3]  = num_play_regions
+//     Per play region j (pbase = base + 4 + j*3):
+//       [pbase+0] = play_start
+//       [pbase+1] = play_end
+//       [pbase+2] = play_muted
+//
+//   Global:
+//     [10 + track_index] = rec buffer: main frames feedback
+//     [20] = export trigger (track_index + 1, 0=none)
+//     [21] = export target track index
+//     [30 + track_index] = crossfade (seconds, from slider)
+//     [40 + track_index] = rec buffer: pre-roll frame count
+//     [50 + track_index] = rec buffer index (0=A, 1=B)
+//     [55 + track_index] = play buffer index (0=A, 1=B)
+//     [60 + track_index] = export buffer index (0=A, 1=B)
+//     [70 + track_index] = play buffer: main frames
+//     [80 + track_index] = play buffer: pre-roll frame count
+
+slider1:0<0,127,1>Track Index
+slider2:50<5,1000,1>Crossfade (ms)
+
+@init
+FRAMES_MAX = 2000000; // ~41s at 48kHz
+BUF_STRIDE = FRAMES_MAX * 2; // stereo interleaved per buffer
+
+BUF_A = 0;
+BUF_B = BUF_STRIDE;
+ST_A = BUF_STRIDE * 2;
+ST_B = ST_A + 8;
+freembuf(ST_B + 8);
+
+// State per buffer: [0]=total_len, [1]=wpos, [2]=was_in_rec_ext, [3]=pre_roll_len, [4]=main_len, [5]=was_in_main
+i = 0;
+while (i < 8) ( ST_A[i] = 0; ST_B[i] = 0; i += 1; );
+was_playing = 0;
+has_group = 0;
+
+@block
+blk_pos = play_position;
+blk_sample = 0;
+my_track = floor(slider1 + 0.5);
+XFADE = slider2 / 1000;
+PRE_ROLL = XFADE;
+POST_ROLL = XFADE;
+gmem[30 + my_track] = XFADE;
+
+// Read current group for this track
+gm = 100 + my_track * 50;
+rec_s_b = gmem[gm];
+rec_e_b = gmem[gm + 1];
+has_group = (rec_s_b != 0 || rec_e_b != 0) ? 1 : 0;
+
+// Determine which buffers are for recording vs playback
+rb = gmem[50 + my_track];
+pb = gmem[55 + my_track];
+rb ? ( rec_bb = BUF_B; rst = ST_B; ) : ( rec_bb = BUF_A; rst = ST_A; );
+pb ? ( play_bb = BUF_B; pst = ST_B; ) : ( play_bb = BUF_A; pst = ST_A; );
+
+// Clear rec buffer state on transport start
+play_state > 0 && !was_playing ? (
+  i = 0;
+  while (i < 8) ( ST_A[i] = 0; ST_B[i] = 0; i += 1; );
+);
+was_playing = play_state > 0;
+
+// Write rec buffer feedback
+rprl = rst[3];
+rst[2] ? (
+  gmem[10 + my_track] = max(rst[1] - rprl, 0);
+) : (
+  gmem[10 + my_track] = rst[4];
+);
+gmem[40 + my_track] = rst[3];
+
+// Write play buffer feedback
+gmem[70 + my_track] = pst[4];
+gmem[80 + my_track] = pst[3];
+
+@sample
+pos = blk_pos + blk_sample / srate;
+blk_sample += 1;
+
+in_play = 0;
+
+play_state > 0 && has_group ? (
+  gm = 100 + my_track * 50;
+
+  rec_s = gmem[gm];
+  rec_e = gmem[gm + 1];
+  rec_muted = gmem[gm + 2];
+  n_play = gmem[gm + 3];
+
+  // --- Recording (into rec buffer) ---
+  pre_s = rec_s - PRE_ROLL;
+  post_e = rec_e + POST_ROLL;
+  in_rec_ext = !rec_muted && pos >= pre_s && pos < post_e;
+  in_main_rec = !rec_muted && pos >= rec_s && pos < rec_e;
+  was_rec_ext = rst[2];
+  was_main = rst[5];
+
+  in_rec_ext && !was_rec_ext ? (
+    rst[1] = 0; rst[3] = 0; rst[4] = 0;
+  );
+  in_main_rec && !was_main ? (
+    rst[3] = rst[1];
+  );
+  !in_main_rec && was_main ? (
+    rst[4] = rst[1] - rst[3];
+  );
+
+  wp = rst[1];
+  in_rec_ext && wp < FRAMES_MAX ? (
+    rec_bb[wp * 2] = spl0;
+    rec_bb[wp * 2 + 1] = spl1;
+    rst[1] = wp + 1;
+  );
+
+  !in_rec_ext && was_rec_ext ? (
+    rst[0] = rst[1];
+    rst[4] == 0 ? rst[4] = rst[0] - rst[3];
+  );
+
+  rst[2] = in_rec_ext;
+  rst[5] = in_main_rec;
+
+  // --- Playback (from play buffer, with crossfade at loop boundaries) ---
+  pprl = pst[3];
+  pml = pst[4];
+  ptotal = pst[0];
+  // If rec and play use same buffer and recording is active, use live values
+  rb == pb ? (
+    in_main_rec ? ( pml = rst[1] - pprl; ) : ( pml = rst[4]; );
+    ptotal = in_rec_ext ? rst[1] : rst[0];
+    pprl = rst[3];
+  );
+  loop_sec = pml / srate;
+  fi_smp = PRE_ROLL * srate;
+  fo_smp = POST_ROLL * srate;
+
+  pml > 0 ? (
+    mix0 = 0;
+    mix1 = 0;
+    pj = 0;
+    while (pj < n_play) (
+      pm = gm + 4 + pj * 3;
+      ps = gmem[pm];
+      pe = gmem[pm + 1];
+      p_flags = floor(gmem[pm + 2]);
+      p_muted = p_flags & 1;
+      p_reverse = (p_flags >> 1) & 1;
+
+      !p_muted && pos >= ps - PRE_ROLL && pos < pe + POST_ROLL ? (
+        play_len = pe - ps;
+        n_iters = ceil(play_len / loop_sec);
+        base_iter = floor((pos - ps) / loop_sec);
+
+        out0 = 0;
+        out1 = 0;
+        ci = max(0, base_iter - 1);
+        ci_max = min(base_iter + 1, n_iters - 1);
+
+        while (ci <= ci_max) (
+          ig = ps + ci * loop_sec;
+          is = ig - PRE_ROLL;
+          ci == n_iters - 1 ? (
+            ie = pe + POST_ROLL;
+          ) : (
+            ie = ig + loop_sec + POST_ROLL;
+          );
+
+          pos >= is && pos < ie ? (
+            soff = floor((pos - ig) * srate + 0.5);
+            p_reverse ? (
+              bp = pprl + pml - 1 - soff;
+            ) : (
+              bp = pprl + soff;
+            );
+            bp >= 0 && bp < ptotal ? (
+              g = 1.0;
+              soff < 0 && fi_smp > 0 ? (
+                g = max(0, (fi_smp + soff) / fi_smp);
+              );
+              r = floor((ie - pos) * srate + 0.5);
+              r < fo_smp && fo_smp > 0 ? ( g *= r / fo_smp; );
+              out0 += play_bb[bp * 2] * g;
+              out1 += play_bb[bp * 2 + 1] * g;
+            );
+          );
+          ci += 1;
+        );
+
+        mix0 += out0;
+        mix1 += out1;
+        in_play = 1;
+      );
+      pj += 1;
+    );
+    in_play ? (
+      spl0 = mix0;
+      spl1 = mix1;
+    );
+  );
+);
+
+// Always mute input pass-through (monitoring handled externally)
+has_group && !in_play ? (
+  spl0 = 0;
+  spl1 = 0;
+);
+
+@gfx 300 40
+gfx_setfont(1, "Arial", 14);
+
+// Handle export trigger
+export_trk = gmem[20];
+export_trk > 0 && (export_trk - 1) == floor(slider1 + 0.5) ? (
+  eb = gmem[60 + my_track]; // which buffer to export
+  eb ? ( exp_bb = BUF_B; exp_st = ST_B; ) : ( exp_bb = BUF_A; exp_st = ST_A; );
+  eml = exp_st[4];
+  etl = exp_st[0];
+  eml > 0 && etl > 0 ? (
+    export_buffer_to_project(exp_bb, etl, 2, srate, gmem[21], 0);
+  );
+  gmem[20] = 0;
+);
+
+// Line 1: Status
+gfx_x = 10; gfx_y = 3;
+has_group ? (
+  is_rec = rst[2];
+  rprl = rst[3];
+  rml = rst[4];
+  is_rec && rml == 0 ? ( rml = max(rst[1] - rprl, 0); );
+
+  is_rec ? (
+    gfx_set(1, 0.2, 0.2);
+    gfx_drawstr("REC");
+  ) : rml > 0 ? (
+    gfx_set(0.2, 1, 0.2);
+    gfx_drawstr(sprintf(#, "%.1fs recorded", rml / srate));
+  ) : (
+    gfx_set(0.5, 0.5, 0.5);
+    gfx_drawstr("Empty");
+  );
+) : (
+  gfx_set(0.5, 0.5, 0.5);
+  gfx_drawstr("Waiting...");
+);
+
+// Line 2: Crossfade
+gfx_x = 10; gfx_y = 20;
+gfx_set(0.6, 0.7, 0.8);
+gfx_drawstr(sprintf(#, "XFade:%dms", floor(slider2 + 0.5)));
