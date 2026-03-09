@@ -174,6 +174,43 @@ local function remove_all_jsfx()
   jsfx_managed = {}
 end
 
+-- Find the child audio track (first child without a Timeline Looper JSFX)
+local function find_child_audio_track(track)
+  local parent_idx = reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER") - 1
+  local depth = reaper.GetMediaTrackInfo_Value(track, "I_FOLDERDEPTH")
+  if depth < 1 then return nil end -- not a folder, no children
+  local num_tracks = reaper.CountTracks(0)
+  local level = 0
+  for i = parent_idx + 1, num_tracks - 1 do
+    local child = reaper.GetTrack(0, i)
+    local child_depth = reaper.GetMediaTrackInfo_Value(child, "I_FOLDERDEPTH")
+    if find_jsfx(child) < 0 then return child end
+    level = level + child_depth
+    if level < 0 then break end -- exited the folder
+  end
+  return nil
+end
+
+-- Create a child track under the JSFX track if one doesn't exist
+local function ensure_child_track(track)
+  local child = find_child_audio_track(track)
+  if child then return child end
+  local parent_idx = reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER") - 1
+  -- Make parent a folder if it isn't already
+  local depth = reaper.GetMediaTrackInfo_Value(track, "I_FOLDERDEPTH")
+  if depth < 1 then
+    reaper.SetMediaTrackInfo_Value(track, "I_FOLDERDEPTH", 1)
+  end
+  -- Insert child track right after parent
+  reaper.InsertTrackAtIndex(parent_idx + 1, false)
+  child = reaper.GetTrack(0, parent_idx + 1)
+  reaper.SetMediaTrackInfo_Value(child, "I_FOLDERDEPTH", -1)
+  reaper.GetSetMediaTrackInfo_String(child, "P_NAME", "Audio", true)
+  reaper.TrackList_AdjustWindows(false)
+  reaper.UpdateArrange()
+  return child
+end
+
 local function ensure_jsfx_on_tracks()
   for track in pairs(track_data) do
     if not jsfx_managed[track] then
@@ -219,8 +256,9 @@ local function ensure_jsfx_on_tracks()
       end
       jsfx_managed[track] = true
     end
+    -- Ensure a child audio track exists for exported items
+    ensure_child_track(track)
   end
-  -- gfx_idle=1 in the JSFX ensures @gfx runs without a visible window
 end
 
 -- ─── gmem sync (Lua → JSFX) ─────────────────────────────────────────────────
@@ -270,13 +308,7 @@ local pending_export = nil
 local export_queue = {}
 local saved_edit_cursor = nil
 
-local function get_track_below(track)
-  local idx = reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER")
-  if idx < reaper.CountTracks(0) then
-    return reaper.GetTrack(0, idx)
-  end
-  return nil
-end
+
 
 local function get_pdc_samples(track)
   local fx_count = reaper.TrackFX_GetCount(track)
@@ -298,7 +330,7 @@ local function get_pdc_samples(track)
 end
 
 local function clear_group_audio(group)
-  local audio_track = get_track_below(group.track)
+  local audio_track = find_child_audio_track(group.track)
   if not audio_track then return end
   local ranges = {}
   local rs = get_item_pos(group.rec_item)
@@ -458,7 +490,7 @@ local function process_export()
       end
     end
     reaper.Undo_EndBlock("Timeline Looper: clear audio", -1)
-    local audio_track = get_track_below(next_exp.group.track)
+    local audio_track = find_child_audio_track(next_exp.group.track)
     reaper.SetEditCurPos(next_exp.rec_start, false, false)
     reaper.gmem_write(60 + next_exp.track_idx, next_exp.export_buf)
     reaper.gmem_write(21, next_exp.track_idx + 1)
@@ -491,7 +523,7 @@ local function process_export()
     set_track_xfade(pe.group.track)
     -- Re-check for audio track (JSFX export may have created it)
     if not pe.audio_track then
-      pe.audio_track = get_track_below(pe.group.track)
+      pe.audio_track = find_child_audio_track(pe.group.track)
     end
     if pe.audio_track then
       local rec_len = get_item_len(pe.group.rec_item)
@@ -551,10 +583,11 @@ local function looper_tick()
   -- Handle arm state transitions
   if looper_armed and not was_armed then
     last_play_state = reaper.GetPlayState()
-    -- Un-bypass JSFX on all managed tracks
+    -- Un-bypass JSFX and enable record monitoring on all managed tracks
     for track in pairs(jsfx_managed) do
       local fx_idx = find_jsfx(track)
       if fx_idx >= 0 then reaper.TrackFX_SetEnabled(track, fx_idx, true) end
+      reaper.SetMediaTrackInfo_Value(track, "I_RECMON", 1)
     end
   elseif not looper_armed and was_armed then
     export_queue = {}
@@ -563,10 +596,11 @@ local function looper_tick()
       reaper.SetEditCurPos(saved_edit_cursor, false, false)
       saved_edit_cursor = nil
     end
-    -- Bypass JSFX on all managed tracks so child track audio passes through
+    -- Bypass JSFX and disable record monitoring on all managed tracks
     for track in pairs(jsfx_managed) do
       local fx_idx = find_jsfx(track)
       if fx_idx >= 0 then reaper.TrackFX_SetEnabled(track, fx_idx, false) end
+      reaper.SetMediaTrackInfo_Value(track, "I_RECMON", 0)
     end
   end
   was_armed = looper_armed
@@ -950,10 +984,8 @@ end
 -- ─── Start ───────────────────────────────────────────────────────────────────
 
 reaper.atexit(function()
-  if looper_armed then
-    restore_track_state()
-    remove_all_jsfx()
-  end
+  restore_track_state()
+  remove_all_jsfx()
 end)
 
 remove_all_jsfx()
