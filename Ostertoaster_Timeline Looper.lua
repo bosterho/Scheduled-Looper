@@ -317,28 +317,6 @@ local function clear_group_audio(group)
   if changed then reaper.UpdateArrange() end
 end
 
-local function snapshot_audio_items(track)
-  local snap = {}
-  if track then
-    for i = 0, reaper.CountTrackMediaItems(track) - 1 do
-      snap[reaper.GetTrackMediaItem(track, i)] = true
-    end
-  end
-  return snap
-end
-
-local function find_new_audio_item(track, snapshot)
-  for i = 0, reaper.CountTrackMediaItems(track) - 1 do
-    local item = reaper.GetTrackMediaItem(track, i)
-    if not snapshot[item] then
-      local take = reaper.GetActiveTake(item)
-      if take and not reaper.TakeIsMIDI(take) then
-        return item
-      end
-    end
-  end
-  return nil
-end
 
 local function compute_export_params(src_filename, rec_len, saved_prl)
   local srate = reaper.GetSetProjectInfo(0, "PROJECT_SRATE", 0, false)
@@ -416,7 +394,7 @@ local function place_play_item_audio(audio_track, play_item, ep)
     end
     -- Last copy has nothing after it — fade-out only covers the post-roll
     if c == n_copies - 1 then
-      reaper.SetMediaItemInfo_Value(item, "D_FADEOUTLEN"\, ep.actual_post)
+      reaper.SetMediaItemInfo_Value(item, "D_FADEOUTLEN", ep.actual_post)
     end
     items[#items + 1] = item
   end
@@ -458,18 +436,28 @@ local function process_export()
     set_track_xfade(next_exp.group.track)
     reaper.Undo_BeginBlock()
     clear_group_audio(next_exp.group)
+    -- Clean up leftover JSFX export items in this group's range on the control track
+    local cleanup_start = next_exp.rec_start - PRE_ROLL
+    local cleanup_end = next_exp.rec_start + get_item_len(next_exp.group.rec_item) + POST_ROLL
+    for i = reaper.CountTrackMediaItems(next_exp.group.track) - 1, 0, -1 do
+      local it = reaper.GetTrackMediaItem(next_exp.group.track, i)
+      local take = reaper.GetActiveTake(it)
+      if take and not reaper.TakeIsMIDI(take) then
+        local it_pos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
+        if it_pos >= cleanup_start and it_pos < cleanup_end then
+          reaper.DeleteTrackMediaItem(next_exp.group.track, it)
+        end
+      end
+    end
     reaper.Undo_EndBlock("Timeline Looper: clear audio", -1)
     local audio_track = get_track_below(next_exp.group.track)
-    local pre_snap = snapshot_audio_items(audio_track)
-    local jsfx_pre_snap = snapshot_audio_items(next_exp.group.track)
     reaper.SetEditCurPos(next_exp.rec_start, false, false)
     reaper.gmem_write(60 + next_exp.track_idx, next_exp.export_buf)
     reaper.gmem_write(21, next_exp.track_idx + 1)
     reaper.gmem_write(20, next_exp.track_idx + 1) -- trigger = track_idx + 1
     pending_export = {
       group = next_exp.group, phase = "wait", tick = 0,
-      audio_track = audio_track, pre_snap = pre_snap,
-      jsfx_pre_snap = jsfx_pre_snap,
+      audio_track = audio_track,
       prl_frames = next_exp.prl_frames,
       group_idx = next_exp.group_idx,
       track = next_exp.track,
@@ -499,12 +487,25 @@ local function process_export()
     end
     if pe.audio_track then
       local rec_len = get_item_len(pe.group.rec_item)
-      -- export_buffer_to_project places item on the JSFX track — search there first
-      local item = find_new_audio_item(pe.group.track, pe.jsfx_pre_snap or {})
-      local item_track = pe.group.track
-      if not item then
-        item = find_new_audio_item(pe.audio_track, pe.pre_snap)
-        item_track = pe.audio_track
+      -- Find the exported audio item near rec position (check both JSFX and audio track)
+      local rec_start = get_item_pos(pe.group.rec_item)
+      local rec_end = rec_start + rec_len
+      local item, item_track
+      local search_tracks = { pe.group.track, pe.audio_track }
+      for _, st in ipairs(search_tracks) do
+        for i = 0, reaper.CountTrackMediaItems(st) - 1 do
+          local it = reaper.GetTrackMediaItem(st, i)
+          local take = reaper.GetActiveTake(it)
+          if take and not reaper.TakeIsMIDI(take) then
+            local it_pos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
+            if it_pos >= rec_start - PRE_ROLL and it_pos < rec_end + POST_ROLL then
+              item = it
+              item_track = st
+              break
+            end
+          end
+        end
+        if item then break end
       end
       if item then
         local take = reaper.GetActiveTake(item)
