@@ -323,6 +323,118 @@ local function cleanup_mic_track()
   mic_track = nil
 end
 
+-- Move rec/play clips off folder-parent, audio-sibling, and mic tracks onto the
+-- correct control track (first child with clips, or a newly inserted track).
+local function relocate_stray_clips()
+  reaper.PreventUIRefresh(1)
+  local any_moved = false
+
+  for _ = 1, 20 do -- safety: re-scan after each move batch (InsertTrack shifts indices)
+    local moved_this_pass = false
+    local num_tracks = reaper.CountTracks(0)
+
+    for t = 0, num_tracks - 1 do
+      local track = reaper.GetTrack(0, t)
+
+      -- Collect rec/play items on this track
+      local stray = {}
+      for i = 0, reaper.CountTrackMediaItems(track) - 1 do
+        local item = reaper.GetTrackMediaItem(track, i)
+        local n = get_item_name(item)
+        if n == "rec" or n:find("play") then stray[#stray + 1] = item end
+      end
+      if #stray == 0 then goto next_track end
+
+      local depth = reaper.GetMediaTrackInfo_Value(track, "I_FOLDERDEPTH")
+      local target = nil
+
+      -- Case 1: folder parent has rec/play clips → move to first child that has clips
+      if depth >= 1 then
+        local level = 0
+        for i = t + 1, num_tracks - 1 do
+          local child = reaper.GetTrack(0, i)
+          local d = reaper.GetMediaTrackInfo_Value(child, "I_FOLDERDEPTH")
+          if level == 0 then
+            for j = 0, reaper.CountTrackMediaItems(child) - 1 do
+              local ci = reaper.GetTrackMediaItem(child, j)
+              local cn = get_item_name(ci)
+              if cn == "rec" or cn:find("play") then target = child; break end
+            end
+            if target then break end
+          end
+          level = level + d
+          if level < 0 then break end
+        end
+        if not target then
+          -- No child has clips; insert a new track inside the folder
+          reaper.InsertTrackAtIndex(t + 1, false)
+          target = reaper.GetTrack(0, t + 1)
+        end
+      end
+
+      -- Case 2: inside a folder and an earlier sibling already has clips (audio-track position)
+      if not target then
+        local parent = reaper.GetParentTrack(track)
+        if parent then
+          local pidx = reaper.GetMediaTrackInfo_Value(parent, "IP_TRACKNUMBER") - 1
+          local level = 0
+          for i = pidx + 1, num_tracks - 1 do
+            local sib = reaper.GetTrack(0, i)
+            if sib == track then break end -- only earlier siblings
+            local d = reaper.GetMediaTrackInfo_Value(sib, "I_FOLDERDEPTH")
+            if level == 0 then
+              for j = 0, reaper.CountTrackMediaItems(sib) - 1 do
+                local si = reaper.GetTrackMediaItem(sib, j)
+                local sn = get_item_name(si)
+                if sn == "rec" or sn:find("play") then target = sib; break end
+              end
+              if target then break end
+            end
+            level = level + d
+            if level < 0 then break end
+          end
+        end
+      end
+
+      -- Case 3: mic track has rec/play clips → move to next track with clips, or insert one
+      if not target then
+        local mt = find_mic_track_by_guid()
+        if mt and track == mt then
+          for i = t + 1, num_tracks - 1 do
+            local cand = reaper.GetTrack(0, i)
+            for j = 0, reaper.CountTrackMediaItems(cand) - 1 do
+              local ci = reaper.GetTrackMediaItem(cand, j)
+              local cn = get_item_name(ci)
+              if cn == "rec" or cn:find("play") then target = cand; break end
+            end
+            if target then break end
+          end
+          if not target then
+            reaper.InsertTrackAtIndex(t + 1, false)
+            target = reaper.GetTrack(0, t + 1)
+          end
+        end
+      end
+
+      if target then
+        for _, item in ipairs(stray) do
+          reaper.MoveMediaItemToTrack(item, target)
+        end
+        moved_this_pass = true
+        any_moved = true
+        break -- restart scan (InsertTrack may have shifted indices)
+      end
+
+      ::next_track::
+    end
+
+    if not moved_this_pass then break end
+  end
+
+  reaper.PreventUIRefresh(-1)
+  if any_moved then reaper.UpdateArrange() end
+end
+
 -- Remove all mirrored FX from a track (everything after the JSFX at index 0)
 local function remove_mirrored_fx(track)
   for i = reaper.TrackFX_GetCount(track) - 1, 1, -1 do
@@ -1733,6 +1845,7 @@ local function imgui_loop()
     if reaper.ImGui_Button(ctx, "Refresh", 60, 0) then
       restore_track_state()
       remove_all_jsfx()
+      relocate_stray_clips()
       scan_all_tracks()
       ensure_jsfx_on_tracks()
     end
@@ -1786,6 +1899,7 @@ end)
 
 reaper.PreventUIRefresh(1)
 remove_all_jsfx()
+relocate_stray_clips()
 scan_all_tracks()
 
 -- Auto-create starter clips if no rec/play clips found on any track
