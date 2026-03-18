@@ -6,7 +6,7 @@ A live looper for REAPER that puts your recordings directly on the timeline as a
 
 1. Install the script and run it from Actions
 2. Place red "rec" clips and green "play" clips on a track as MIDI items
-3. Hit Record - when the playhead crosses a rec clip it records, when it crosses a play clip it loops what was recorded
+3. Hit Record — when the playhead crosses a rec clip it records, when it crosses a play clip it loops what was recorded
 4. Audio appears on the timeline as items you can move, edit, and arrange
 5. Add take FX to play clips and they'll be heard during live playback AND copied to exported items
 6. Crossfade slider on the TCP controls seamless loop transitions
@@ -14,7 +14,7 @@ A live looper for REAPER that puts your recordings directly on the timeline as a
 ## Install
 
 1. Install [ReaImGui](https://forum.cockos.com/showthread.php?t=250419) if you don't have it
-2. Install [js_ReaScriptAPI](https://forum.cockos.com/showthread.php?t=212174) (recommended, for smooth FX editing)
+2. Install [js_ReaScriptAPI](https://forum.cockos.com/showthread.php?t=212174) (recommended, for smooth FX parameter editing)
 3. Extensions > ReaPack > Import repositories
 4. Paste: `https://raw.githubusercontent.com/bosterho/Timeline-Looper/main/index.xml`
 5. Extensions > ReaPack > Browse packages > find "Ostertoaster Timeline Looper" > Install
@@ -22,203 +22,193 @@ A live looper for REAPER that puts your recordings directly on the timeline as a
 
 ## How It Works
 
-### Concept
+### The Idea
 
-Traditional loopers hide your audio inside a plugin. This looper uses the REAPER timeline itself: you define where to record and where to loop using MIDI items as visual markers, and everything you record gets exported as real audio items you can see, edit, slice, and rearrange.
+Traditional loopers hide your audio inside a plugin. This looper uses the REAPER timeline itself — you define where to record and where to play back using colored MIDI items as visual markers, and everything you record gets exported as real audio items you can see, edit, slice, and rearrange.
 
-### Clips
+### Clips and Groups
 
-- **Rec clips** (red/muted-pink MIDI items named "rec"): define where the looper records incoming audio
-- **Play clips** (green MIDI items named "play"): define where the recorded audio loops back
+- **Rec clips** (pink/red MIDI items named "rec") — define where the looper captures incoming audio
+- **Play clips** (green MIDI items named "play") — define where the recorded audio loops back
 
-Clips are organized into **groups**: each rec clip starts a new group, and subsequent play clips belong to that group until the next rec clip appears. A group represents one recording pass and all the places it loops.
+Clips are organized into **groups**: each rec clip starts a new group, and any play clips after it belong to that group until the next rec clip. Think of a group as "record this phrase, then loop it in these places."
 
-### Recording and Playback Flow
-
-1. Press Record in REAPER (the looper requires REAPER's transport to be in record mode)
-2. As the playhead enters a rec clip, the JSFX captures incoming audio into an internal buffer
-3. As the playhead enters a play clip, the JSFX plays back the buffer in a loop with crossfading
-4. If a play clip is longer than the recorded audio, the buffer loops seamlessly
-5. When the playhead reaches the next rec clip, the Lua script swaps buffers (double-buffering) so the old recording continues playing while the new one records
-6. After each recording finishes, the buffer is exported as an audio item on the Audio track below
-
-### Double Buffering
-
-The JSFX uses two audio buffers (A and B). While one buffer records the current group, the other holds the previous group's audio for playback. The Lua script manages buffer swapping:
-
-- On advance to next group: swap the rec buffer, keep the play buffer
-- When all play clips from the old group finish: switch the play buffer to match the new rec buffer
-
-This ensures playback is never interrupted during recording.
-
-### Track Architecture
-
-When the script starts, it creates a folder structure for each looper track:
-
+**Example layout:**
 ```
-Parent Track (volume/pan/effects for the whole looper)
-  JSFX Track (rec/play MIDI items + Timeline Looper JSFX + mirrored FX)
-  Audio Track (exported audio items)
+|  rec  |  play  |  play  |  rec  |  play  |
+|--group 1-------|--------|--group 2-------|
 ```
 
-The script also creates a **Mic track** at the top of the project:
-- Has the Timeline Looper Input JSFX which captures mic input via gmem
-- Armed for monitoring (not recording to disk)
-- Master send disabled (you monitor via your audio interface's direct monitoring)
+Group 1 records during the first rec clip, then loops that recording during both play clips. Group 2 records new audio and loops it in its own play clip.
 
-### Crossfade
+### Recording and Playback
 
-Each JSFX instance has a crossfade slider (5-1000ms) visible on the TCP. This controls:
-- Pre-roll: how much audio before the rec/play region boundaries is captured
-- Post-roll: how much audio after boundaries is captured
-- Fade-in/fade-out lengths on exported audio items
-- Loop iteration crossfade (when play clips loop the buffer)
+1. Hit Record in REAPER (the looper needs REAPER to be in record mode)
+2. When the playhead enters a rec clip, the looper captures your audio input
+3. When the playhead enters a play clip, you hear the recording looped back
+4. If a play clip is longer than what was recorded, the audio loops seamlessly with crossfading
+5. When the playhead reaches the next group's rec clip, the previous group's audio keeps playing while new audio records into a separate buffer (double-buffering)
+6. After recording finishes, the audio is exported as items on the Audio track below
 
-The crossfade value is persisted per track in the project's ExtState.
+### Track Setup
+
+When you first run the script, it automatically sets up:
+
+- A **Mic track** at the top — this captures your audio input. It's armed for monitoring but doesn't record to disk. You hear yourself through your audio interface's direct monitoring, not through REAPER.
+- A **folder structure** for each looper track:
+  - **Parent track** — control volume/pan/effects for the whole looper
+  - **JSFX track** — where your rec/play clips live, along with the looper plugin
+  - **Audio track** — where exported audio items appear
+
+If you already have a track with rec/play clips on it, the script wraps it in this folder structure automatically. If no clips exist, it creates starter rec and play clips at the cursor.
+
+### First Time Use
+
+1. Run the script — it creates a Mic track and starter clips on the selected track
+2. Move the playhead to before the rec clip
+3. Hit Record
+4. Play or sing during the rec clip
+5. Listen to it loop back during the play clip
+6. Stop — your audio appears as items on the Audio track
+
+### Adding More Clips
+
+To add more rec/play clips to a track:
+1. Create a new MIDI item (Insert > New MIDI item, or double-click in empty space)
+2. Name it "rec" or "play" (right-click > Item properties, or F2)
+3. Click the Refresh button in the looper window
+
+You can have as many groups (rec + play sequences) as you want on a single track.
 
 ## Features
 
-### Take Envelopes (Volume and Pan)
+### Crossfade
 
-Add volume or pan envelopes directly on play clip takes (the MIDI items). These are:
-- Applied in real-time during JSFX playback via linear interpolation
-- Copied to exported audio items with proper time-slicing for looped copies
-- Scaled by playrate so they stretch correctly when play clips have non-1.0 rates
+Each looper track has a crossfade slider visible on the TCP (track control panel). This single control (5-1000ms) sets how smoothly audio transitions at boundaries:
 
-Pan uses REAPER's stereo balance law: `L *= min(1, 1+pan)`, `R *= min(1, 1-pan)`.
+- **At rec clip edges** — captures a bit of extra audio before and after the defined region
+- **At loop points** — when a play clip loops the buffer, the end of one iteration crossfades into the start of the next
+- **On exported items** — audio items get matching fade-in/fade-out lengths
+
+**Use case:** Set a longer crossfade (200-500ms) for ambient/pad loops to get seamless transitions. Use a shorter crossfade (20-50ms) for rhythmic material where you want tight loop points.
+
+### Take Volume and Pan Envelopes
+
+You can draw volume and pan automation directly on the play clip's take envelopes.
+
+**Use case — volume swell:** Draw a volume envelope that ramps from 0 to 1 over the first half of a play clip, creating a fade-in effect on your loop that you hear in real time and that gets baked into the exported audio.
+
+**Use case — panning:** Draw a pan envelope that sweeps left to right over the duration of a play clip, creating stereo movement on your loop.
+
+These envelopes:
+- Are heard in real time during JSFX playback
+- Are copied to exported audio items
+- Scale correctly when you change the play clip's playrate
+- Are properly sliced when the play clip is longer than the recording (each loop iteration gets its portion of the envelope)
 
 ### Take FX (Item Effects)
 
-Add any FX to play clip takes (right-click item > Take FX). The looper:
+Add any FX directly to a play clip's take (right-click item > Take FX chain). The looper mirrors these FX onto the track so they're heard during live playback, not just on the exported audio.
 
-1. **Mirrors FX to the track chain**: copies take FX as track FX after the JSFX, one set per play clip
-2. **Multi-channel routing**: JSFX outputs each clip on its own stereo channel pair, mirrored FX process only their clip's channels via pin mappings, a summing JSFX folds everything back to stereo
-3. **Dynamic bypass**: FX are bypassed when their clip isn't active, unbypassed 0.5s before the clip starts (to avoid clicks)
-4. **Parameter sync**: take FX parameter values are synced to mirrored track FX every scan cycle (~1s), deferred while mouse is held for smooth editing
-5. **FX parameter envelopes**: automation on take FX parameters is copied to hidden track FX envelopes, time-shifted to match clip positions
-6. **Exported items**: take FX and their parameter envelopes are copied to exported audio items, with envelope slicing for looped copies
+**Use case — different reverb per section:** Put a short room reverb on one play clip and a long hall reverb on another. Each clip gets its own processing, and the FX automatically activate only when that clip is playing.
 
-The FX chain structure on the JSFX track when take FX are present:
-```
-[0] Timeline Looper JSFX (outputs per-clip stereo pairs)
-[1] Mirrored FX for play clip 1 (pin-mapped to ch 0-1)
-[2] Mirrored FX for play clip 2 (pin-mapped to ch 2-3)
-[3] Mirrored FX for play clip 3 (pin-mapped to ch 4-5)
-... up to 8 clips
-[N] Timeline Looper Sum (sums ch 2-15 into ch 0-1)
-```
+**Use case — filter sweep:** Add an EQ to a play clip, then draw an automation envelope on the EQ's frequency parameter. The filter sweep plays back in real time and gets copied to the exported audio.
 
-When no play clips have take FX, the track stays at 2 channels with just the JSFX (no overhead).
+**Use case — effect only on repeats:** Add a delay or distortion to a later play clip in the group. The first play clip loops clean, the second one loops with the effect.
+
+How it works behind the scenes:
+- The looper copies your take FX onto the JSFX track as regular track FX
+- Each clip's FX are routed to only process that clip's audio (using multi-channel pin mapping)
+- FX are bypassed when their clip isn't playing, and unbypassed just before the clip starts
+- When you tweak a parameter on the take FX, the track FX updates to match (syncs on mouse-up so editing feels smooth)
+- FX parameter automation envelopes are copied to hidden track envelopes so they affect live playback
+- Everything — FX, parameters, and parameter envelopes — gets copied to the exported audio items too
 
 ### Playrate
 
-Change a play clip's take playrate to speed up or slow down playback:
-- JSFX uses fractional buffer indexing with linear interpolation for smooth pitch shifting
-- Loop iteration length scales with playrate
-- Crossfade boundaries are adjusted
-- Exported items get matching playrate with "Preserve pitch" disabled (since the JSFX can't pitch-stretch)
-- Take envelopes scale correctly with playrate
+Change a play clip's take playrate to speed up or slow down the loop.
+
+**Use case — half-speed effect:** Set playrate to 0.5 on a play clip to hear your recording at half speed (one octave down), like a classic tape slow-down effect.
+
+**Use case — double-time:** Set playrate to 2.0 to hear the recording at double speed for a chipmunk/glitch effect.
+
+**Use case — subtle detune:** Set playrate to 0.99 or 1.01 for a subtle pitch-shifted layer when combined with a normal-speed play clip.
+
+Playrate affects:
+- Live playback pitch and speed (no time-stretching — pitch shifts proportionally)
+- Loop iteration length (a 2x playrate means the buffer plays in half the time, so it loops twice as often)
+- Exported audio items (they get the matching playrate with "Preserve pitch" off)
+- Envelope timing (volume, pan, and FX envelopes all scale correctly)
 
 ### Reverse Playback
 
-Name a play clip "play rev" (or anything containing both "play" and "rev") to reverse playback. The buffer reads backwards. Exported items are reversed using REAPER's take reverse.
+Name a play clip "play rev" (or anything containing both "play" and "rev") to play the recorded audio backwards.
 
-### Muting and Solo
+**Use case — reverse reverb:** Record a note with reverb on the input, then play it back reversed for a reverse-reverb swell effect.
 
-- Muting a rec clip skips recording for that group
-- Muting a play clip skips playback for that clip
-- Track mute/solo is respected via `is_track_silenced()`
+**Use case — ambient texture:** Combine a forward play clip and a reversed play clip of the same recording for layered ambient textures.
+
+### Muting Clips
+
+Mute any rec or play clip to skip it:
+
+- **Muting a rec clip** — the looper doesn't record during that region. Useful for skipping a recording pass while keeping the arrangement structure.
+- **Muting a play clip** — the looper doesn't play back during that region. Useful for silencing a loop in a specific section without deleting the clip.
+
+Track-level mute and solo are also respected — if the track is muted or another track is soloed, the looper skips that track entirely.
 
 ### Audio Export
 
-When enabled (checkbox in the UI), recorded audio is exported to the Audio track:
-- Export triggers after the rec region + crossfade + PDC delay have passed
-- Exported items are placed incrementally as the playhead passes each clip
-- Remaining items are placed when transport stops
-- Each exported item gets: correct position, length, crossfade, snap offset, playrate, take envelopes, take FX, and FX parameter envelopes
-- Looped play clips get multiple audio items with item grouping and time-sliced envelopes
+When the "Export audio" checkbox is enabled (default), recorded audio is placed as items on the Audio track:
+
+- Items appear incrementally as the playhead passes each clip (you can see them being placed in real time)
+- When you stop transport, any remaining items are placed immediately
+- Each exported item gets all the properties from its source clip: position, length, crossfade, playrate, volume/pan envelopes, take FX, and FX parameter envelopes
+- When a play clip loops the recording multiple times, each loop iteration becomes a separate audio item (grouped together for easy editing)
+
+**Use case — arrangement building:** Record a chord progression, let it loop through several play clips across your song structure, then stop and rearrange the exported audio items to fine-tune the arrangement.
+
+**Use case — offline editing:** Disable export while performing to keep things lightweight, then enable it and do one final pass to capture everything as audio.
+
+### Multiple Looper Tracks
+
+You can have rec/play clips on multiple tracks. Each track gets its own JSFX instance with independent recording, playback, and crossfade settings.
+
+**Use case — multi-track looping:** Put rec/play clips on separate tracks for guitar, vocals, and keys. Each records and loops independently, but they're all synced to the same timeline positions.
+
+### Plugin Delay Compensation (PDC)
+
+If you add latency-inducing FX on the parent track or anywhere downstream of the JSFX, the looper automatically compensates. Recording, playback, and export timing all account for PDC so everything stays in sync.
+
+**Use case — mixing while looping:** Add a compressor and EQ on the parent track to shape the overall sound. The looper adjusts its timing so the recorded audio lines up correctly despite the FX latency.
 
 ### Auto-Start
 
-The script installs a startup hook so it automatically runs when you reopen the project (if it was running when you last saved). This can be disabled by closing the script window before saving.
-
-## Plugin Delay Compensation (PDC)
-
-If you add latency-inducing FX after the JSFX on the track chain (or on parent tracks), the looper compensates:
-
-- **Recording**: buffer write position is shifted back by PDC so content aligns with real transport time
-- **Playback**: raw `play_position` is used (already PDC-ahead), downstream FX delay cancels it out
-- **Export timing**: Lua waits extra PDC time before triggering export since the JSFX finishes recording late
-- PDC is recomputed on each rescan (~1s) by summing PDC from all FX after the JSFX and up the parent chain
+The script saves a startup hook so it automatically runs when you reopen the project (if it was running when you saved). Close the script window before saving to disable this.
 
 ## UI
 
-The script opens a small ReaImGui window with:
-- Status indicator (Recording / Idle)
-- Refresh button (re-scans tracks and re-adds JSFX after adding new rec/play clips)
-- Export audio checkbox
+The script opens a small window with:
+- **Status indicator** — shows "RECORDING" (red) when transport is in record mode, "Idle" otherwise
+- **Refresh button** — re-scans all tracks for rec/play clips and re-adds JSFX. Click this after adding new clips or tracks.
+- **Export audio checkbox** — toggle whether recorded audio gets placed as items on the Audio track
 
-Keyboard shortcuts are forwarded to REAPER when the window has focus (Space = play/stop, Home/End = go to start/end).
+Keyboard shortcuts work when the window has focus: Space (play/stop), Enter (play/stop), Home (go to start), End (go to end).
 
 ## Cleanup
 
-When the script exits (close the window or toggle the action off):
-- Mirrored FX and summing JSFX are removed from all JSFX tracks
-- Track channel counts reset to 2
-- Input JSFX removed from the Mic track
-- Mic track disarmed and monitoring disabled
-- All JSFX instances removed
+When you close the script window (or toggle the action off), everything is cleaned up:
+- All JSFX instances removed from tracks
+- Mirrored FX removed
+- Mic track disarmed and monitoring disabled, input JSFX removed
+- Track channel counts reset
 
-The Mic track itself is preserved and identified by GUID on next startup, so it won't be duplicated.
+The Mic track itself is preserved — the script remembers it by GUID and reuses it on next startup. Your rec/play clips and exported audio items are untouched.
 
-## Files
+## Tips
 
-| File | Purpose |
-|------|---------|
-| `Ostertoaster_Timeline Looper.lua` | Main Lua companion script (scanning, gmem, exports, FX mirroring, ImGui UI) |
-| `Timeline Looper.jsfx` | JSFX plugin for real-time audio capture and playback with crossfading |
-| `Timeline Looper Input.jsfx` | Input capture JSFX for the Mic track (writes audio to gmem) |
-| `Timeline Looper Sum.jsfx` | Channel summing JSFX (folds multi-channel per-clip output to stereo) |
-
-The Lua script auto-syncs all JSFX files from the Scripts folder to `Effects/Ostertoaster/` on startup.
-
-## Technical Details
-
-### gmem Layout
-
-The JSFX and Lua communicate via named shared memory (`timeline_looper`):
-
-| Slot | Purpose |
-|------|---------|
-| `[0]` | Export trigger (track_index + 1, 0 = none) |
-| `[1]` | Export target track index |
-| `[100 + idx]` | Rec buffer: main frames feedback |
-| `[200 + idx]` | Crossfade duration (seconds) |
-| `[300 + idx]` | Rec buffer: pre-roll frame count |
-| `[400 + idx]` | Rec buffer index (0=A, 1=B) |
-| `[500 + idx]` | Play buffer index (0=A, 1=B) |
-| `[600 + idx]` | Export buffer index (0=A, 1=B) |
-| `[700 + idx]` | Play buffer: main frames |
-| `[800 + idx]` | Play buffer: pre-roll frame count |
-| `[900 + idx]` | PDC offset (samples, from Lua) |
-| `[950 + idx]` | Multi-channel mode (1 = per-clip channels, 0 = mix) |
-| `[1000 + idx*100]` | Per-track rec/play region data (start, end, flags, playrate per clip) |
-| `[5000 + idx*200 + clip*9]` | Volume envelope points per play clip (up to 4 points) |
-| `[7000 + idx*200 + clip*9]` | Pan envelope points per play clip (up to 4 points) |
-
-### JSFX Internals
-
-- **Buffer layout**: BUF_A at offset 0, BUF_B at offset BUF_STRIDE (stereo interleaved, up to ~41s at 48kHz)
-- **State tracking**: ST_A/ST_B store per-buffer state (total length, write position, pre-roll length, main length, flags)
-- **@block**: caches all gmem data to prevent mid-block race conditions with Lua
-- **@sample**: recording writes to rec buffer with PDC correction; playback reads from play buffer with crossfading, envelope application, and per-clip channel output
-- **@gfx**: handles export trigger (calls `export_buffer_to_project`) and displays status
-- **Multi-channel**: when `multichan` flag is set, each play clip outputs to its own stereo pair (spl0-1, spl2-3, etc.); otherwise all clips mix to spl0-1
-
-### Lua Script Structure
-
-- **Startup**: syncs JSFX files, removes old instances, scans tracks, creates starter clips if needed, sets up Mic track and JSFX instances
-- **Scan** (~1s interval): validates items, rescans tracks, persists crossfade values, computes PDC, syncs FX containers and parameters
-- **Tick** (~30Hz): detects record transitions, manages group advancement, buffer swapping, export queuing/processing, incremental audio placement, FX bypass toggling
-- **FX mirroring**: structural changes (add/remove FX) trigger full rebuild; parameter changes sync via `TrackFX_SetParam`; envelope changes detected via hashing
-- **Export pipeline**: queue > wait for JSFX export > find exported item > compute params > place rec audio > place play audio (with looping, crossfade, envelopes, FX)
+- **Direct monitoring:** The Mic track has master send disabled. You should monitor your input through your audio interface's direct monitoring, not through REAPER's monitoring.
+- **Crossfade sweet spot:** Start with the default 200ms crossfade. If you hear clicks at loop points, increase it. If loops feel sluggish, decrease it.
+- **Long play clips:** A play clip can be any length — if it's longer than the recording, the audio loops seamlessly. Make a 1-bar recording and a 16-bar play clip for a sustained loop.
+- **Offline FX tweaking:** Stop transport, click on a play clip's timeline position, and tweak its take FX. The looper activates that clip's FX at the cursor position so you can preview changes even when stopped.
+- **Multiple play clips per group:** You can have several play clips after a single rec clip, each with different lengths, playrates, FX, or envelopes. They all loop the same recorded audio but process it differently.
